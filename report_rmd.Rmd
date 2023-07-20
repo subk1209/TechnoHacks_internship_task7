@@ -1,0 +1,286 @@
+---
+title: "Task 7 | Customer Churn Prediction"
+author: "Subhajit Karmakar"
+date: "2023-07-20"
+output: html_document
+---
+
+<style type="text/css">
+  body{
+  font-size: 12pt;
+}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,fig.width = 10, fig.height = 5)
+```
+
+
+## Introduction
+In this data, we are provided with the information on different features of customers and our ultimate goal is to predict which customers are prone to leave the company, so that the company can fix those issues to retain the customers. 
+
+**Source:** <https://www.kaggle.com/datasets/blastchar/telco-customer-churn>
+
+First we will import the necessary libraries and then call the data.
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(scales)
+library(gridExtra)
+library(ggcorrplot)
+library(caTools)
+library(rpart)
+library(rpart.plot)
+library(vip)
+library(caret)
+
+df <- read_csv("D:/Internships/Technohack/Task - 7/data.csv")
+
+knitr::kable(head(df[1:5,]), format = 'html', caption = 'First few rows of the data:') %>% 
+  kableExtra::kable_paper(bootstrap_options = "striped", full_width = F)
+```
+
+
+```{r}
+glimpse(df)
+summary(df)
+```
+
+From the summary, we can see that, 11 `NA` values are there in `TotalCharges` column, since they are few in number, we will simply remove them. Also, the the `SeniorCitizen` column should be of categorical type, but it is in numeric format. So, we will also change that.
+
+```{r}
+df %>% na.omit() %>% mutate(SeniorCitizen = case_when(
+  SeniorCitizen == 0 ~ "No",
+  SeniorCitizen == 1 ~ "Yes"
+)) %>% select(-customerID) -> df
+```
+
+### EDA
+
+Now, we will do the exploratory data analysis to extract information from the data. For that, first we will separate out the numeric and categorical columns.
+
+```{r}
+cols <- colnames(df)
+
+# Numerical columns:
+num_vars <- c('tenure','MonthlyCharges','TotalCharges')
+
+# Categorical columns (excluding the target):
+cat_vars <- (cols[!(cols %in% num_vars)])[1:16]
+
+
+# Count plots of the categorical variables:
+par(mfrow = c(4,4))
+par(mar = c(rep(2.5,4)))
+for(i in cat_vars)
+  table(df[i]) %>% plot(main = paste(i),
+                        xlab = '', ylab = '',
+                        col = 'red')
+```
+
+Now we will take a look at the **churn rate** in the company.
+```{r}
+# churn rate:
+df %>% count(Churn) %>% mutate('Perc' = percent(n/sum(n))) %>% 
+  ggplot(aes(x = Churn, y = n)) +
+  geom_bar(stat = 'identity', position = position_dodge2(),
+           width = 0.3, fill = 'yellow', colour = 'black') +
+  theme_minimal() + theme(axis.title.y = element_blank()) +
+  geom_text(aes(label = Perc), vjust = 3)
+```
+
+**Comment:** $27\%$ of the customers churned out from the company, which is quite high figure.
+
+Now we will see which variables are more responsible for this high churn rate. We will also perform statistical tests to judge the significance of the features. 
+
+### Visualization - 1
+```{r}
+plot1 <- function(var){
+  df %>% count({{var}}, Churn) %>% 
+    ggplot(aes(x = {{var}}, y = n, fill = Churn)) +
+    geom_col(position = 'fill', width = 0.3) + 
+    theme_minimal() + 
+    scale_y_continuous(label = percent, n.breaks = 6) +
+    theme(axis.title.y = element_blank(),
+          axis.text.x = element_text(angle = 15))
+}
+
+attach(df)
+plot1(gender) -> p1
+plot1(SeniorCitizen) -> p2
+plot1(Partner) -> p3
+plot1(Dependents) -> p4
+plot1(PhoneService) -> p5
+plot1(MultipleLines) -> p6
+plot1(InternetService) -> p7
+plot1(OnlineSecurity) -> p8
+grid.arrange(p1,p2,p3,p4,p5,p6,p7,p8, nrow = 2)
+
+plot1(OnlineBackup) -> p9
+plot1(DeviceProtection) -> p10
+plot1(TechSupport) -> p11
+plot1(StreamingTV) -> p12
+plot1(StreamingMovies) -> p13
+plot1(Contract) -> p14
+plot1(PaperlessBilling) -> p15
+plot1(PaymentMethod) -> p16
+grid.arrange(p9,p10,p11,p12,p13,p14,p15,p16, nrow = 2)
+detach(df)
+```
+
+### Statistical test - 1
+Here we are performing Chi-Square test for association between the categorical variables and the churn status to get an idea about which variables are statistically associated with the churn variable.
+
+```{r}
+M1 <- data.frame(matrix(ncol = 3, nrow = 0))
+
+for(i in cat_vars){
+  df %>% select(Churn, all_of(i)) %>% 
+    table() %>% chisq.test() -> ch
+  M1 %>% rbind(c(paste('Churn -', i),
+                ch$statistic %>% round(1), 
+                ch$p.value)) -> M1
+} 
+
+colnames(M1) <- c('Pairs','Statistic','p-value')
+print(M1)
+```
+
+**Comment:** From the graphs, we can see that some features do not affect the churn rate at all which is also evident from the `p-values` of the `Chisq` test for association. For example, the `gender` does not determine whether a customer is prone to churn out from the company or not, also the `p-value` for the `gender` is much more high than 0.05. Similarly the `PhoneServices`, `MultipleLines` etc. For the other cases, the churn rate is varying with the levels of the variables. 
+
+* Those who are senior citizens, are more prone to churn out from the company.
+
+* Those who are using fiber optic internet service, are prone to churn out from the company.
+
+* The customers who do not have any online security, are prone to churn out from the company.
+
+Similar explanations for the other variables, the company need to focus on these issues to retain the customers.
+
+### Visualization - 2
+```{r}
+df %>% select(all_of(num_vars), Churn) %>% 
+  pivot_longer(tenure:TotalCharges, names_to = 'vars',
+               values_to = 'value') %>% 
+  ggplot(aes(x = Churn, y = value)) +
+  geom_boxplot(outlier.colour = 'red', fill = 'lightyellow') +
+  geom_violin(alpha = 0.4, fill = 'green', colour = NA) +
+  theme_minimal() + facet_wrap(.~vars, scales = 'free') + 
+  theme(axis.title.y = element_blank())
+```
+
+### Statistical test - 2
+Here we are performing a non-parametric test to judge whether the distribution of the continuous variables differs significantly w.r.t the churn status of the customers.
+
+```{r}
+M2 <- matrix(ncol = 2, nrow = length(num_vars),
+            dimnames = list(paste(1:length(num_vars)),
+              c('Variables','p-value'))) %>% as.data.frame()
+
+for(i in 1:length(num_vars)){
+  f <- reformulate('Churn', response = num_vars[i])
+  w <- wilcox.test(f, data = df)
+  
+  M2[i,] <- c(num_vars[i], w$p.value)
+}
+print(M2)
+```
+
+**Comment:** From the statistical test, it is evident that all the numerical variables are statistically significant, which is clear from the plots also. 
+
+
+```{r}
+# Some joint plots by considering the most significant variables:
+
+df %>% ggplot(aes(x = Churn, y = TotalCharges)) + 
+  geom_boxplot(outlier.colour = 'red', fill = 'yellow') + 
+  facet_grid(OnlineSecurity ~ Contract, scales = 'free') +
+  theme_bw() + labs(title = 'Plot - 1 | Contract ~ OnlineSecurity')
+
+df %>% ggplot(aes(x = Churn, y = tenure)) + 
+  geom_boxplot(outlier.colour = 'red', fill = 'yellow') + 
+  facet_grid(OnlineSecurity ~ Contract, scales = 'free') +
+  theme_bw() + labs(title = 'Plot - 2 | Contract ~ OnlineSecurity')
+```
+
+```{r}
+# Correlation between numeric features:
+df %>% select(all_of(num_vars)) %>% cor() %>% 
+  ggcorrplot(type = 'upper', lab = T)
+```
+
+## Classification model
+Now we will build a model that can predict which customers are most likely to leave a company. Here we will use **Decision tree** algorithm.
+
+```{r}
+# Splitting the data into train and test set:
+set.seed(42)
+s <- sample.split(df$Churn, SplitRatio = 3/4)
+train_data <- df[s,]
+test_data <- df[!s,]
+
+
+f <- function(d)(paste(d[1], 'x', d[2]))
+glue::glue("Dimension of training data: {d1}",
+           "Dimension of testing data: {d2}",
+           d1 = f(dim(train_data)), d2 = f(dim(test_data)),
+           .sep = '\n')
+```
+
+```{r}
+# Decision tree:
+r <- rpart(Churn ~ ., data = train_data)
+rpart.plot(r, cex = 0.6) # tree
+```
+
+Now that we have built the model, we might want to see the most important variables in classification i.e., which variables have the highest contribution to the task of classification.
+
+```{r}
+vip(r, aesthetics = list(fill = 'red'), num_features = 20) + 
+  theme_minimal() + labs(title = 'Importance of the features')
+```
+
+**Comment:** The `Contract` is the most important variable here, the next are `tenure`,`TotalCharges` etc. and so on.
+
+
+
+#### Accuracy
+We will now check the accuracy and other measures of the fitted model. 
+```{r}
+# Function to obtain the scores:
+stats2 <- function(C){ # C := Confusion Matrix
+  t <- C$table
+  
+  acc <- C$overall[[1]]
+  pre <- t[2,2]/(t[2,2]+t[2,1])
+  rec <- t[2,2]/(t[2,2]+t[1,2])
+  f1 <- 2*(rec*pre)/(rec+pre)
+  
+  matrix(c(acc,pre,rec,f1), byrow = T,
+         dimnames = list(c('Accuracy','Precision',
+                           'Recall','F1-Score'))) -> M
+  return(list('Confusion Matrix' = t,
+              'Metrics' = M))
+}
+
+
+churn_pred_train <- predict(r, type = 'class')
+confusionMatrix(churn_pred_train, as.factor(train_data$Churn)) -> C1
+
+churn_pred_test <- predict(r, newdata = test_data, type = 'class')
+confusionMatrix(churn_pred_test, as.factor(test_data$Churn)) -> C2
+```
+
+**Scores | Training data**
+```{r}
+stats2(C1)
+```
+
+**Scores | Testing data**
+```{r}
+stats2(C2)
+```
+
+
+
+
